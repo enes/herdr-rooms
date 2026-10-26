@@ -1,0 +1,27 @@
+{
+  "description": "Report this session's turns to its herdr room. A no-op unless this herdr pane is in a room.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v herdr-rooms >/dev/null 2>&1 && herdr-rooms hook claude-prompt; exit 0",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v herdr-rooms >/dev/null 2>&1 && herdr-rooms hook claude-stop; exit 0",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

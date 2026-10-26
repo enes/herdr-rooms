@@ -1,0 +1,13 @@
+{
+  "name": "herdr-rooms",
+  "owner": {
+    "name": "Enes Kantepe"
+  },
+  "plugins": [
+    {
+      "name": "herdr-rooms",
+      "source": "./claude-plugin",
+      "description": "Rooms for herdr: /room opens a review room"
+    }
+  ]
+}
