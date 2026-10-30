@@ -1,6 +1,6 @@
 [package]
 name = "herdr-rooms"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Rooms where coding agents work together inside herdr; first, a review room where agents review each other until they agree"
 license = "MIT"

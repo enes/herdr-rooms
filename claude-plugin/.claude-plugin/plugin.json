@@ -1,6 +1,6 @@
 {
   "name": "herdr-rooms",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Rooms for herdr: /room opens a review room where another agent reviews your session until you both agree.",
   "author": {
     "name": "Enes Kantepe"

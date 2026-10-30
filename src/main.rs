@@ -1,3 +1,4 @@
+mod bind;
 mod herdr;
 mod hook;
 mod review;

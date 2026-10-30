@@ -15,14 +15,28 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 use std::path::PathBuf;
 
-/// Opens the popup over the calling pane (the agent the user typed `/room` in).
+/// Opens the popup over the calling pane (the agent the user typed `/room` in). The token
+/// it prints lands in that agent's own record of the conversation, which is how the popup
+/// tells which session it was opened from.
 pub fn open() -> Result<()> {
     let host = match std::env::var("HERDR_PANE_ID").ok().filter(|s| !s.is_empty()).or_else(context_pane) {
         Some(pane) => pane,
         None => codex_daemon_pane()?,
     };
-    herdr::open_plugin_pane("setup", &["--env", &format!("HOST_PANE={host}"), "--focus"])?;
-    println!("Room popup opened.");
+    let (token, now) = (crate::bind::new_token(), state::now_ms());
+    herdr::open_plugin_pane(
+        "setup",
+        &[
+            "--env",
+            &format!("HOST_PANE={host}"),
+            "--env",
+            &format!("HOST_TOKEN={token}"),
+            "--env",
+            &format!("HOST_TOKEN_MS={now}"),
+            "--focus",
+        ],
+    )?;
+    println!("Room popup opened. (room token {token})");
     Ok(())
 }
 
@@ -245,6 +259,33 @@ impl Form {
         matches!(self.focus, TOPIC | HOST_NICK | REVIEWER_NICK)
     }
 
+    fn set_focus(&mut self, field: usize) {
+        if self.focus == field {
+            return;
+        }
+        // An unchanged default stays automatic when the reviewer changes.
+        for (field, role) in [(HOST_NICK, Role::Host), (REVIEWER_NICK, Role::Reviewer)] {
+            if self.focus == field {
+                let default = crate::review::default_nick(role, self.host_kind(), self.kind());
+                if let Some(value) = self.text_field() {
+                    if *value == default {
+                        value.clear();
+                    }
+                }
+            }
+        }
+        self.focus = field;
+        let role = match field {
+            HOST_NICK if self.host_nick.is_empty() => Role::Host,
+            REVIEWER_NICK if self.reviewer_nick.is_empty() => Role::Reviewer,
+            _ => return,
+        };
+        let default = crate::review::default_nick(role, self.host_kind(), self.kind());
+        if let Some(value) = self.text_field() {
+            *value = default;
+        }
+    }
+
     /// The text field under focus, if any.
     fn text_field(&mut self) -> Option<&mut String> {
         match self.focus {
@@ -257,14 +298,17 @@ impl Form {
 
     /// The picked `@` names, `None` where left empty.
     fn nicks(&self) -> Result<(Option<String>, Option<String>)> {
-        let pick = |n: &str| (!n.is_empty()).then(|| n.to_lowercase());
-        let (host, reviewer) = (pick(&self.host_nick), pick(&self.reviewer_nick));
+        let default = |role| crate::review::default_nick(role, self.host_kind(), self.kind());
+        let pick = |n: &str, role| {
+            let n = n.to_lowercase();
+            (!n.is_empty() && n != default(role)).then_some(n)
+        };
+        let (host, reviewer) = (pick(&self.host_nick, Role::Host), pick(&self.reviewer_nick, Role::Reviewer));
         for n in [&host, &reviewer].into_iter().flatten() {
             if crate::review::RESERVED_NICKS.contains(&n.as_str()) {
                 return Err(anyhow!("@{n} is taken: it always means a role or both agents"));
             }
         }
-        let default = |role| crate::review::default_nick(role, self.host_kind(), self.kind());
         let host_final = host.clone().unwrap_or_else(|| default(Role::Host));
         let reviewer_final = reviewer.clone().unwrap_or_else(|| default(Role::Reviewer));
         if host_final == reviewer_final {
@@ -306,7 +350,8 @@ impl Form {
 
     fn open_list(&mut self, field: usize) {
         let cursor = if field == MODEL { self.model } else { self.effort };
-        (self.focus, self.dropdown) = (field, Some(Dropdown { field, cursor }));
+        self.set_focus(field);
+        self.dropdown = Some(Dropdown { field, cursor });
     }
 
     fn pick(&mut self, option: usize) {
@@ -335,25 +380,29 @@ impl Form {
     /// A left click on a spot `draw` reported.
     fn click(&mut self, hit: Hit) -> Option<Click> {
         match hit {
-            Hit::Focus(field) => self.focus = field,
+            Hit::Focus(field) => self.set_focus(field),
             Hit::List(field) => self.open_list(field),
             Hit::Pick(option) => self.pick(option),
             Hit::Dismiss => self.dropdown = None,
             Hit::Reviewer(i) => {
-                self.focus = REVIEWER;
+                self.set_focus(REVIEWER);
                 if self.reviewer != i {
                     self.reviewer = i;
                     self.reset_options();
                 }
             }
             Hit::Step(field, delta) => {
-                self.focus = field;
+                self.set_focus(field);
                 self.change(delta);
             }
-            Hit::Perms(read_only) => (self.focus, self.read_only) = (PERMS, read_only),
+            Hit::Perms(read_only) => {
+                self.set_focus(PERMS);
+                self.read_only = read_only;
+            }
             Hit::Cancel => return Some(Click::Close),
             Hit::Open => {
-                (self.focus, self.open_button) = (BUTTONS, true);
+                self.set_focus(BUTTONS);
+                self.open_button = true;
                 return Some(Click::Open);
             }
         }
@@ -368,6 +417,18 @@ impl Form {
         }
         let pick = |list: &[String], i: usize| (i > 0).then(|| list[i].clone());
         let (host_nick, reviewer_nick) = self.nicks()?;
+        // The session this popup was opened from: the one whose record holds the token
+        // `open` printed. Without a token (a popup `open` did not open) the room cannot tell.
+        let token = std::env::var("HOST_TOKEN").ok().filter(|t| !t.is_empty());
+        let since: u64 = std::env::var("HOST_TOKEN_MS").ok().and_then(|ms| ms.parse().ok()).unwrap_or(0);
+        let host_session = match token {
+            Some(token) => crate::bind::session_of(&host.kind, &token, since)?,
+            None => {
+                return Err(anyhow!(
+                    "open the room from inside your agent (/room in Claude Code, !room in Codex), so the room can tell its session"
+                ))
+            }
+        };
         let room = RoomConfig {
             id: format!("{}", state::now_ms()),
             cwd: host.cwd.clone(),
@@ -383,9 +444,13 @@ impl Form {
             reviewer_name: None,
             host_nick,
             reviewer_nick,
+            swapped: false,
+            reviewer_session: None,
+            host_session,
+            room_pid: None,
         };
         room.save()?;
-        state::map_pane(&room.host_pane, &room.id, Role::Host)?;
+        state::map_pane(&room.host_pane, &room.id, Role::Host, false, room.host_session.as_deref())?;
         // The room splits the host pane down; the reviewer later splits the host to the
         // right, so the room ends up as a full-width strip under both agents.
         herdr::open_plugin_pane(
@@ -446,11 +511,11 @@ pub fn run() -> Result<()> {
             match key.code {
                 KeyCode::Enter | KeyCode::Char(' ') if matches!(form.focus, MODEL | EFFORT) => form.open_list(form.focus),
                 KeyCode::Esc => return Ok(()),
-                KeyCode::Up | KeyCode::BackTab => form.focus = form.focus.saturating_sub(1),
-                KeyCode::Down | KeyCode::Tab => form.focus = (form.focus + 1).min(BUTTONS),
+                KeyCode::Up | KeyCode::BackTab => form.set_focus(form.focus.saturating_sub(1)),
+                KeyCode::Down | KeyCode::Tab => form.set_focus((form.focus + 1).min(BUTTONS)),
                 // The two name boxes sit side by side.
-                KeyCode::Left if form.focus == REVIEWER_NICK => form.focus = HOST_NICK,
-                KeyCode::Right if form.focus == HOST_NICK => form.focus = REVIEWER_NICK,
+                KeyCode::Left if form.focus == REVIEWER_NICK => form.set_focus(HOST_NICK),
+                KeyCode::Right if form.focus == HOST_NICK => form.set_focus(REVIEWER_NICK),
                 KeyCode::Left => form.change(-1),
                 KeyCode::Right => form.change(1),
                 KeyCode::Char(' ') if !form.editing_text() => form.change(1),
@@ -719,7 +784,7 @@ fn draw(f: &mut Frame, form: &Form) -> Vec<(Rect, Hit)> {
         let inside = boxed(f, area, border(on), Some(title));
         hits.push((area, Hit::Focus(field)));
         let shown = tail(value, inside.width.saturating_sub(2));
-        let text = if value.is_empty() { Span::styled(default(role), muted) } else { Span::raw(shown.clone()) };
+        let text = if value.is_empty() && !on { Span::styled(default(role), muted) } else { Span::raw(shown.clone()) };
         f.render_widget(Line::from(vec![Span::styled("@", muted), text]), inside);
         if on {
             cursor = Some(Position::new(inside.x + 1 + shown.chars().count() as u16, inside.y));
@@ -797,5 +862,81 @@ fn draw_list(f: &mut Frame, hits: &mut Vec<(Rect, Hit)>, full: Rect, anchor: Rec
         let text = spread(vec![Span::raw(format!(" {name}"))], vec![mark, Span::raw(" ")], line.width);
         f.render_widget(Paragraph::new(text).style(style), line);
         hits.push((line, Hit::Pick(i)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn form(reviewer: &'static str) -> Form {
+        Form {
+            host_pane: String::new(),
+            host: Ok(herdr::AgentInfo { kind: "codex".into(), status: String::new(), cwd: String::new() }),
+            topic: String::new(),
+            candidates: vec![Candidate {
+                kind: reviewer,
+                label: reviewer,
+                ready: true,
+                version: String::new(),
+                note: String::new(),
+            }],
+            reviewer: 0,
+            models: vec!["default".into()],
+            model: 0,
+            efforts: vec!["default".into()],
+            effort: 0,
+            rounds: 3,
+            read_only: true,
+            host_nick: String::new(),
+            reviewer_nick: String::new(),
+            focus: TOPIC,
+            open_button: true,
+            dropdown: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn nickname_click_allows_deleting_and_replacing_default() {
+        let mut form = form("claude");
+        form.click(Hit::Focus(HOST_NICK));
+        assert_eq!(form.host_nick, "codex");
+        form.text_field().unwrap().pop();
+        assert_eq!(form.host_nick, "code");
+        form.text_field().unwrap().clear();
+        form.click(Hit::Focus(HOST_NICK));
+        assert!(form.host_nick.is_empty());
+        form.text_field().unwrap().push_str("alice");
+        form.set_focus(REVIEWER_NICK);
+        assert_eq!(form.reviewer_nick, "claude");
+        assert_eq!(form.nicks().unwrap(), (Some("alice".into()), None));
+        form.set_focus(HOST_NICK);
+        assert_eq!(form.host_nick, "alice");
+    }
+
+    #[test]
+    fn focusing_same_kind_defaults_does_not_reject_reserved_names() {
+        let mut form = form("codex");
+        for (field, expected) in [(HOST_NICK, "host"), (REVIEWER_NICK, "reviewer")] {
+            form.set_focus(field);
+            assert_eq!(form.text_field().unwrap(), expected);
+            assert_eq!(form.nicks().unwrap(), (None, None));
+        }
+        form.text_field().unwrap().clear();
+        form.text_field().unwrap().push_str("host");
+        assert!(form.nicks().is_err());
+    }
+
+    #[test]
+    fn untouched_default_tracks_reviewer_changes() {
+        let mut form = form("claude");
+        form.set_focus(HOST_NICK);
+        form.click(Hit::Reviewer(0));
+        assert!(form.host_nick.is_empty());
+        form.candidates[0].kind = "codex";
+        form.set_focus(HOST_NICK);
+        assert_eq!(form.host_nick, "host");
+        assert_eq!(form.nicks().unwrap(), (None, None));
     }
 }

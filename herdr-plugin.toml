@@ -1,18 +1,12 @@
 id = "herdr-rooms"
 name = "Rooms"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.5"
 description = "Rooms where your coding agents work together. First room: a review room, where another agent reviews your session until they agree."
 platforms = ["macos", "linux"]
 
 [[build]]
 command = ["sh", "scripts/install.sh"]
-
-[[actions]]
-id = "open"
-title = "Rooms: open a review room"
-contexts = ["pane", "workspace", "global"]
-command = ["./target/release/herdr-rooms", "open"]
 
 [[actions]]
 id = "install"

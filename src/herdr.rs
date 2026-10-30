@@ -112,6 +112,12 @@ pub fn agents_in(kind: &str, cwd: &Path) -> Vec<Located> {
     found
 }
 
+/// The ids of the panes of the herdr server this process runs in.
+pub fn pane_ids() -> Result<Vec<String>> {
+    let v = call(&["pane", "list"])?;
+    Ok(v["result"]["panes"].as_array().into_iter().flatten().filter_map(|p| p["pane_id"].as_str().map(String::from)).collect())
+}
+
 pub fn pane_split(target: &str, direction: &str, cwd: &str) -> Result<String> {
     let v = call(&["pane", "split", target, "--direction", direction, "--cwd", cwd, "--no-focus"])?;
     v["result"]["pane"]["pane_id"].as_str().map(String::from).ok_or_else(|| anyhow!("pane split returned no pane id"))
